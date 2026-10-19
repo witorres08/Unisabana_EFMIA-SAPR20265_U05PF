@@ -468,6 +468,14 @@ El segundo lo encontré tarde y por casualidad. `recorrido_completo` construía 
 Ninguna de estas cosas la puedo probar con estos datos sin invalidar el experimento. Esa restricción —no poder usar al final lo que aprendí sobre datos que ya miré— es la parte del método que más me costó respetar, y la que separa un resultado de una anécdota.
 
 ---
+**Joan Montenegro**  
+**reproducir un resultado también forma parte importante de un proyecto** 
+
+La revisión del repositorio me permitió entender que la reproducibilidad depende de más elementos que las semillas aleatorias. También requiere que otra persona pueda instalar las dependencias, localizar los modelos y ejecutar la evaluación siguiendo las instrucciones disponibles.
+
+Un caso que me llamó la atención fue que las pruebas podían terminar sin errores aunque algunas no se hubieran ejecutado por falta de una dependencia. Esto me llevó a distinguir entre una ejecución exitosa y una verificación completa. También encontramos modelos incluidos en el repositorio que un evaluador no podía recuperar porque los buscaba en otra ubicación.
+
+Estos problemas no cambiaban lo aprendido por los agentes, pero dificultaban comprobar sus resultados. Si repitiera el proyecto, incorporaría una revisión desde un entorno limpio antes de entregar: instalar el proyecto, ejecutar las pruebas y regenerar la evaluación únicamente con los archivos publicados. Considero que esa comprobación debería acompañar la evaluación del modelo, porque permite que el trabajo pueda ser utilizado y revisado por otras personas.
 
 ## 9. Limitaciones
 
@@ -481,30 +489,147 @@ Declaradas, no escondidas. Cada una acota hasta dónde llega la conclusión de �
 6. **Costos simplificados.** 10 bps fijos sobre la rotación, sin modelar deslizamiento, impacto de mercado ni el diferencial compra-venta, y con el efectivo remunerado al 0 %. En BTC la cifra coincide con la comisión *taker* de Binance, así que es realista para el tamaño de orden pequeño; para órdenes grandes sería optimista.
 7. **El estado no usa volumen ni datos de libro de órdenes.** Fue deliberado (§1), pero significa que el agente opera con menos información de la que tendría un sistema real.
 
+### Mejora pendiente para próximos entrenamientos: escala de la deriva
+
+Una revisión posterior identificó un problema en la deriva, la tendencia media
+añadida a las trayectorias sintéticas de entrenamiento. EntornoBootstrap
+convierte la deriva anual a cada barra dividiendo entre 252. Esa conversión
+corresponde al Brent diario, pero BTC horario tiene 8 760 barras al año. Por
+ello, el aporte de la deriva por hora queda amplificado unas 34,8 veces.
+
+**La corrección está pendiente:** utilizar las barras anuales de cada mercado y
+añadir una prueba que verifique la conversión. Para medir su efecto será
+necesario entrenar nuevos modelos y compararlos manteniendo las demás
+condiciones. Los resultados publicados corresponden a la implementación
+histórica; el impacto de este problema sobre su desempeño todavía no se ha
+cuantificado.
+
 ---
 
 ## 10. Reproducir estos resultados
 
+### Instalación y pruebas con uv
+
+Se necesita `uv` instalado. El proyecto requiere Python 3.11 o posterior; los
+comandos siguientes usan Python 3.12, con el que se verificaron las pruebas.
+Desde la raíz del repositorio:
+
 ```bash
-git clone <este repositorio>
-cd agente-inversor
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-python src/data.py                     # baja y valida las tres series
-python -m pytest                       # 58 pruebas en 7 archivos
-jupyter execute notebooks/eda.ipynb    # análisis exploratorio (solo entrenamiento)
-
-python src/experiments.py 1            # fase 1: la memorización, sobre la serie real
-python src/experiments.py 2            # fase 2: remuestreo por bloques
-python src/pipeline.py                 # fases 3 a 7, decidiendo con validación
-python src/train_alt.py ppo --semilla 0        # PPO (Stable-Baselines3)
-python src/train_alt.py tabular --semilla 0    # Q-Learning tabular
-python src/report.py                   # tablas y figuras del informe
-
-python src/baselines.py --tramo prueba # solo las líneas base, por separado
-python src/evaluate.py                 # LEE EL TRAMO DE PRUEBA — una sola vez
+uv sync --locked --python 3.12 --extra dev
+uv run --locked --extra dev pytest -ra
 ```
+
+`uv sync` crea o actualiza `.venv`. `--locked` exige que `uv.lock` coincida con
+`pyproject.toml` y conserva las versiones resueltas. El extra `dev` incluye las
+herramientas de pruebas y notebooks. DQN, el agente tabular, los experimentos,
+el pipeline y los reportes funcionan sin instalar PPO. En un entorno sin
+`stable-baselines3`, **94 pruebas pasan y se omiten 7** que requieren esa
+dependencia; las pruebas tabulares se ejecutan siempre.
+
+Para entrenar PPO o ejecutar todas las pruebas, se añade su extra opcional:
+
+```bash
+uv sync --locked --python 3.12 --extra dev --extra ppo
+uv run --locked --extra dev --extra ppo pytest -ra
+```
+
+Con ambos extras, **las 101 pruebas pasan sin omisiones**. `--extra ppo` instala
+`stable-baselines3`; no selecciona ni ejecuta ese algoritmo. PPO se entrena
+explícitamente con `src/train_alt.py ppo`.
+
+### Datos, análisis y entrenamiento
+
+```bash
+uv run --locked python src/data.py  # baja y valida las tres series
+uv run --locked --extra dev jupyter execute notebooks/eda.ipynb
+
+uv run --locked python src/experiments.py 1 --pasos 120000  # serie real
+uv run --locked python src/experiments.py 2 --pasos 120000  # remuestreo por bloques
+uv run --locked python src/pipeline.py --pasos 120000  # fases 3 a 7
+uv run --locked --extra ppo python src/train_alt.py ppo --semilla 0
+uv run --locked python src/train_alt.py tabular --semilla 0
+uv run --locked python src/report.py
+```
+
+Los YAML de `configs/` documentan las configuraciones de referencia y final;
+los scripts no los cargan automáticamente. Los valores efectivos de cada
+corrida se guardan en `config.json` dentro de su carpeta: `results/corridas/<etiqueta>/`
+para BTC y `results_brent/corridas/<etiqueta>/` para Brent. DQN (`train.py`),
+PPO y el tabular (`train_alt.py`) eligen esa carpeta con `--mercado`.
+El pipeline usa
+150 000 pasos por defecto; `--pasos 120000` selecciona el presupuesto reportado
+para BTC. Los ejemplos de `train_alt.py` entrenan una semilla; para obtener los
+cinco miembros de cada comité se repiten con `--semilla` de 0 a 4.
+
+Para entrenar y evaluar una nueva corrida DQN de Brent sin mover archivos:
+
+```bash
+uv run --locked python src/train.py --mercado brent --pasos 120000 --etiqueta nueva_s0
+uv run --locked python src/evaluate.py --mercado brent --patron nueva_s0 --etiqueta nueva_s0
+```
+
+Este ejemplo usa los parámetros por defecto del entrenador. `--patron` selecciona
+la corrida nueva y `--etiqueta` en el evaluador guarda sus resultados con un
+nombre propio, conservando la evaluación publicada.
+
+`experiments.py`, `pipeline.py` y `report.py` también aceptan `--mercado`
+(por defecto, `btc`). Para ejecutar la búsqueda y generar reportes de Brent:
+
+```bash
+uv run --locked python src/experiments.py 1 --mercado brent --pasos 150000
+uv run --locked python src/experiments.py 2 --mercado brent --pasos 150000
+uv run --locked python src/pipeline.py --mercado brent --pasos 150000
+uv run --locked python src/report.py --mercado brent
+```
+
+Cada fase entrena el mercado solicitado y guarda su resumen en la carpeta de
+ese mercado. El pipeline lee sus corridas para seleccionar la recompensa,
+la capacidad y la frecuencia, y guarda `decisiones.json` en la misma carpeta.
+Los reportes generan allí `resumen_experimentos.csv`; las figuras de Brent
+usan nombres como `recompensas_brent_f3.png` y `brecha_memorizacion_brent.png`.
+Estos comandos ejecutan nuevas corridas; para evaluar directamente los modelos
+incluidos se usan los comandos de la sección siguiente.
+
+`Escalador.de_dict()` acepta los nombres antiguos de los indicadores diarios
+guardados de Brent (por ejemplo, `ret_5` y `vol_21`) y los traduce a los nombres
+actuales. Conserva el orden, las medias y las desviaciones; los archivos
+guardados permanecen intactos. Esos nombres antiguos requieren ventanas diarias.
+
+### Evaluación final por mercado
+
+```bash
+uv run --locked python src/baselines.py --tramo prueba
+uv run --locked python src/evaluate.py
+uv run --locked python src/evaluate.py --mercado brent
+```
+
+La evaluación lee el tramo de prueba: la configuración y los modelos deben
+quedar fijados antes de ejecutarla. En `evaluate.py`, `--mercado` selecciona
+conjuntamente los datos, las corridas candidatas, el comité y la carpeta de salida:
+
+| Mercado | Corridas | Comité incluido | Tablas, JSON y bitácoras |
+|---|---|---|---|
+| `btc` (por defecto) | `results/corridas/` | `results/comite/` | `results/` |
+| `brent` | `results_brent/corridas/` | `results_brent/comite/` | `results_brent/` |
+
+Para el mejor individuo, el evaluador usa `corridas/<corrida>/mejor.pt` dentro
+de la carpeta del mercado si existe; si falta, recupera
+`comite/semilla_<semilla>.pt` y comprueba que su configuración y paso de
+entrenamiento correspondan al individuo elegido. Esa recuperación requiere
+también el archivo `semilla_<semilla>.config.json` y falla con un mensaje
+explícito si el respaldo falta o no corresponde. La evaluación de ambos mercados
+puede completarse con los modelos incluidos, sin volver a entrenar. Si faltan
+los modelos del mercado solicitado, se informa del error sin usar los de otro.
+
+Con la etiqueta predeterminada `prueba`, las salidas se llaman
+`evaluacion_prueba.csv`, `evaluacion_prueba.json` y `bitacora_dqn_prueba.csv`
+dentro de la carpeta del mercado. Las figuras quedan en `figuras/`: BTC genera
+`equity_prueba.png` y `exposicion_prueba.png`; Brent genera
+`equity_brent_prueba.png` y `exposicion_brent_prueba.png`.
+
+Los entrenadores y el evaluador comparten la misma selección de carpetas por
+mercado. Las corridas nuevas de Brent quedan directamente en
+`results_brent/corridas/`, disponibles para `evaluate.py --mercado brent`.
 
 ### El dataset, identificado
 
@@ -514,11 +639,8 @@ python src/evaluate.py                 # LEE EL TRAMO DE PRUEBA — una sola vez
 | `data/brent_crudo.csv` | Brent spot diario, 9 102 barras desde 1987 | `datasets/oil-prices` (EIA) |
 | `data/sp500m_crudo.csv` | S&P 500 mensual, 1871-2026 | `datasets/s-and-p-500` (Shiller) |
 
-Los CSV no se versionan: los descarga `python src/data.py`, que es la fuente reproducible. Ver `data/README.md`.
-
-Para la réplica sobre el Brent, añadir `--mercado brent` a `train.py` / `evaluate.py`.
-
-La evaluación final funciona sin volver a entrenar: los cinco miembros del comité están versionados en `results/comite/` (son redes de 483 parámetros). Los pesos de las corridas intermedias no se versionan.
+Los CSV no se versionan: los descarga `src/data.py` mediante el comando de
+`uv run` indicado arriba. Ver `data/README.md`.
 
 Todas las fuentes de aleatoriedad están sembradas: `torch.manual_seed`, el generador del replay buffer, el del entorno, el del remuestreo y el de la política ε-greedy reciben la misma semilla de `Config.semilla`. `test_dos_agentes_con_la_misma_semilla_son_identicos` verifica que dos corridas con la misma semilla produzcan la misma secuencia de acciones.
 
@@ -549,18 +671,23 @@ agente-inversor/
 ├── configs/
 │   ├── base.yaml              # configuración de referencia
 │   └── final.yaml             # la del agente reportado en §7, con su justificación
-├── tests/                     # 58 pruebas en 7 archivos
+├── tests/                     # 101 pruebas en 11 archivos; 7 requieren el extra ppo
 │   ├── test_sin_fuga.py       # ← el que sostiene la honestidad del experimento (los dos mercados)
 │   ├── test_entorno.py        # contabilidad: costos, patrimonio, recompensas, frecuencia
+│   ├── test_entrenamiento_rutas.py # entrenamiento breve por mercado y evaluación sin mover archivos
 │   ├── test_baselines.py      # las líneas base son lo que dicen ser
 │   ├── test_agente.py         # DQN, replay, truncación
 │   ├── test_bootstrap.py      # el remuestreo preserva estadística y destruye orden
+│   ├── test_evaluacion_modelos.py # respaldos y evaluación de BTC y Brent por separado
 │   ├── test_evaluacion_rapida.py  # la tabla Q es la misma política + regresión del error de §8
+│   ├── test_escalador.py      # compatibilidad de formatos y conservación de estados
+│   ├── test_experimentos_mercados.py # fases, decisiones y reportes por mercado
 │   └── test_agentes_comparados.py # PPO y tabular comparten la interfaz del DQN
 ├── results/                   # BTC: corridas, comité, decisiones y evaluación
 ├── results_brent/             # la réplica del apéndice A
 ├── figuras/
 ├── pyproject.toml
+├── uv.lock                    # versiones resueltas para uv sync --locked
 └── README.md
 ```
 
@@ -569,7 +696,7 @@ agente-inversor/
 1. **El código de entrenamiento no puede leer el tramo de prueba.** `train.montar()` no lo carga: hay que pedirlo con `incluir_prueba=True`, y el único módulo que lo hace es `evaluate.py`. Cualquier intento desde `train.py`, `experiments.py` o `pipeline.py` muere con `KeyError: 'prueba'`.
 2. `results/decisiones.json` registra cada decisión con la tabla de validación que la justificó.
 3. `results/corridas/*/config.json` guarda la configuración resuelta de cada corrida, con la partición incluida.
-4. `python -m pytest tests/test_sin_fuga.py` verifica, en los dos mercados, la causalidad de los indicadores, el congelamiento del escalador y que ninguna barra operable aparezca en dos tramos.
+4. `uv run --locked --extra dev pytest tests/test_sin_fuga.py` verifica, en los dos mercados, la causalidad de los indicadores, el congelamiento del escalador y que ninguna barra operable aparezca en dos tramos.
 
 ---
 
